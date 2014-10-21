@@ -5,6 +5,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,11 +14,13 @@ import (
 	"github.com/Dieterbe/statsd-go"
 	"github.com/graphite-ng/carbon-relay-ng/admin"
 	"github.com/graphite-ng/carbon-relay-ng/routing"
+	pickle "github.com/kisielk/og-rek"
 	"github.com/rcrowley/goagain"
 	"io"
 	"log"
 	"net"
 	"os"
+	"reflect"
 	"runtime/pprof"
 	"strings"
 )
@@ -33,15 +37,22 @@ type Blacklist struct {
 	Comment string
 }
 
+type Rec struct {
+	name  string
+	value string
+	date  int64
+}
+
 type Config struct {
-	Listen_addr string
-	Admin_addr  string
-	Http_addr   string
-	Spool_dir   string
-	First_only  bool
-	Routes      map[string]*routing.Route
-	Statsd      StatsdConfig
-	Blacklist   []Blacklist
+	Listen_addr        string
+	Listen_addr_pickle string
+	Admin_addr         string
+	Http_addr          string
+	Spool_dir          string
+	First_only         bool
+	Routes             map[string]*routing.Route
+	Statsd             StatsdConfig
+	Blacklist          []Blacklist
 }
 
 var (
@@ -67,6 +78,70 @@ func accept(l *net.TCPListener, config Config) {
 		go handle(c, config)
 	}
 }
+func extract(in interface{}, rec *Rec, deep uint8) {
+	switch reflect.TypeOf(in).Kind() {
+	case reflect.Slice:
+		s := reflect.ValueOf(in)
+		for i := 0; i < s.Len(); i++ {
+			vv := s.Index(i).Interface()
+			switch vv.(type) {
+			case string:
+				if deep == 0 {
+					rec.name = vv.(string)
+				} else {
+					rec.value = vv.(string)
+				}
+			case int64:
+				rec.date = vv.(int64)
+			default:
+				deep += 1
+				extract(vv, rec, deep)
+			}
+
+		}
+	}
+
+}
+func accept_pickle(l *net.TCPListener, config Config) {
+	for {
+		c, err := l.AcceptTCP()
+		if nil != err {
+			log.Println(err)
+			break
+		}
+		go handle_pickle(c, config)
+	}
+}
+
+func handle_pickle(c *net.TCPConn, config Config) {
+	defer c.Close()
+
+	header := make([]byte, 4)
+	for {
+		_, err := io.ReadFull(c, header)
+		if err == nil {
+
+			size := binary.BigEndian.Uint32(header)
+			data := make([]byte, size)
+			_, _ = io.ReadFull(c, data)
+			iobuffer := bytes.NewReader(data)
+			dec := pickle.NewDecoder(iobuffer)
+			v, err := dec.Decode()
+			if err == nil {
+				s := reflect.ValueOf(v)
+				for i := 0; i < s.Len(); i++ {
+					rec := Rec{}
+					extract(s.Index(i).Interface(), &rec, 0)
+					to_dispatch <- []byte(fmt.Sprintf("%s %s %v\n", rec.name, rec.value, rec.date))
+				}
+			} else {
+				log.Println("errr", err)
+			}
+		} else {
+			break
+		}
+	}
+}
 
 func handle(c *net.TCPConn, config Config) {
 	defer c.Close()
@@ -81,6 +156,7 @@ LineReader:
 			}
 			break
 		}
+		log.Println(string(buf))
 		if isPrefix { // TODO Recover from partial reads.
 			log.Println("isPrefix: true")
 			break
@@ -285,8 +361,10 @@ func main() {
 
 	// Follow the goagain protocol, <https://github.com/rcrowley/goagain>.
 	l, ppid, err := goagain.GetEnvs()
+	lp, ppid, err := goagain.GetEnvs()
 	if nil != err {
 		laddr, err := net.ResolveTCPAddr("tcp", config.Listen_addr)
+		lpaddr, err := net.ResolveTCPAddr("tcp", config.Listen_addr_pickle)
 		if nil != err {
 			log.Println(err)
 			os.Exit(1)
@@ -298,9 +376,19 @@ func main() {
 		}
 		log.Printf("listening on %v", laddr)
 		go accept(l.(*net.TCPListener), config)
+
+		lp, err = net.ListenTCP("tcp", lpaddr)
+		if err != nil {
+			log.Println(err)
+			os.Exit(1)
+		}
+		log.Printf("Listening pickle on %v", lpaddr)
+		go accept_pickle(lp.(*net.TCPListener), config)
 	} else {
 		log.Printf("resuming listening on %v", l.Addr())
 		go accept(l.(*net.TCPListener), config)
+		go accept_pickle(lp.(*net.TCPListener), config)
+
 		if err := goagain.KillParent(ppid); nil != err {
 			log.Println(err)
 			os.Exit(1)
