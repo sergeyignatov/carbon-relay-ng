@@ -120,30 +120,30 @@ func handle_pickle(c *net.TCPConn, config Config) {
 	defer c.Close()
 
 	header := make([]byte, 4)
+	rec := Rec{}
 	for {
 		_, err := io.ReadFull(c, header)
-		if err == nil {
-
-			size := binary.BigEndian.Uint32(header)
-			data := make([]byte, size)
-			_, err = io.ReadFull(c, data)
-			if err == nil {
-				iobuffer := bytes.NewReader(data)
-				dec := pickle.NewDecoder(iobuffer)
-				v, err := dec.Decode()
-				if err == nil {
-					s := reflect.ValueOf(v)
-					for i := 0; i < s.Len(); i++ {
-						rec := Rec{}
-						extract(s.Index(i).Interface(), &rec, 0)
-						to_dispatch <- []byte(fmt.Sprintf("%s %s %v\n", rec.name, rec.value, rec.date))
-					}
-				} else {
-					log.Println("errr", err)
-				}
-			}
-		} else {
+		if err != nil {
 			break
+		}
+
+		size := binary.BigEndian.Uint32(header)
+		data := make([]byte, size)
+		_, err = io.ReadFull(c, data)
+		if err != nil {
+			break
+		}
+
+		iobuffer := bytes.NewReader(data)
+		dec := pickle.NewDecoder(iobuffer)
+		v, err := dec.Decode()
+		if err != nil {
+			break
+		}
+		s := reflect.ValueOf(v)
+		for i := 0; i < s.Len(); i++ {
+			extract(s.Index(i).Interface(), &rec, 0)
+			to_dispatch <- []byte(fmt.Sprintf("%s %s %v\n", rec.name, rec.value, rec.date))
 		}
 	}
 }
