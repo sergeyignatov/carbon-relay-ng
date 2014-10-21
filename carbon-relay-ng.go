@@ -88,6 +88,9 @@ func extract(in interface{}, rec *Rec, deep uint8) {
 			case string:
 				if deep == 0 {
 					rec.name = vv.(string)
+					if strings.HasPrefix(rec.name, ".") {
+						rec.name = rec.name[1:]
+					}
 				} else {
 					rec.value = vv.(string)
 				}
@@ -123,19 +126,21 @@ func handle_pickle(c *net.TCPConn, config Config) {
 
 			size := binary.BigEndian.Uint32(header)
 			data := make([]byte, size)
-			_, _ = io.ReadFull(c, data)
-			iobuffer := bytes.NewReader(data)
-			dec := pickle.NewDecoder(iobuffer)
-			v, err := dec.Decode()
+			_, err = io.ReadFull(c, data)
 			if err == nil {
-				s := reflect.ValueOf(v)
-				for i := 0; i < s.Len(); i++ {
-					rec := Rec{}
-					extract(s.Index(i).Interface(), &rec, 0)
-					to_dispatch <- []byte(fmt.Sprintf("%s %s %v\n", rec.name, rec.value, rec.date))
+				iobuffer := bytes.NewReader(data)
+				dec := pickle.NewDecoder(iobuffer)
+				v, err := dec.Decode()
+				if err == nil {
+					s := reflect.ValueOf(v)
+					for i := 0; i < s.Len(); i++ {
+						rec := Rec{}
+						extract(s.Index(i).Interface(), &rec, 0)
+						to_dispatch <- []byte(fmt.Sprintf("%s %s %v\n", rec.name, rec.value, rec.date))
+					}
+				} else {
+					log.Println("errr", err)
 				}
-			} else {
-				log.Println("errr", err)
 			}
 		} else {
 			break
